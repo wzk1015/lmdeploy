@@ -32,6 +32,7 @@ def load_vl_model(model_path: str,
                   backend_config: Optional[Union[TurbomindEngineConfig,
                                                  PytorchEngineConfig]] = None):
     """load visual model."""
+    # import ipdb; ipdb.set_trace()
     if not os.path.exists(model_path):
         revision = getattr(backend_config, 'revision', None)
         download_dir = getattr(backend_config, 'download_dir', None)

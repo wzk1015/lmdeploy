@@ -74,11 +74,13 @@ class CUDASingleGraphRunner:
         current_stream = torch.cuda.current_stream()
 
         # warmup
+        print("!!! warmup")
         self.model(**padded_kwargs)
 
         self._graph = torch.cuda.CUDAGraph()
         # unsafe kernel call in other thread might invalid the capture
         # so we set thread_safe capture mode here.
+        print("!!! cuda.graph open")
         with torch.cuda.graph(self._graph,
                               pool=self.pool,
                               stream=current_stream,

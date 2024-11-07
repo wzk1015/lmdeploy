@@ -6,6 +6,7 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
+from lmdeploy.vl.constants import IMAGE_DUMMY_TOKEN_INDEX
 
 from .patch import build_model_from_hf_config
 from .utils.cudagraph import CudaGraphMixin
@@ -25,6 +26,11 @@ class InternVLChatModel(nn.Module, CudaGraphMixin):
         self.language_model = build_model_from_hf_config(llm_config,
                                                          dtype=dtype,
                                                          device=device)
+        # import ipdb; ipdb.set_trace()
+        self.llm_arch_name = llm_config.architectures[0]
+        
+        # for Mono-InternVL
+        self.is_mono = self.llm_arch_name == 'InternLM2VEForCausalLM'
 
     def forward(
         self,
@@ -35,7 +41,22 @@ class InternVLChatModel(nn.Module, CudaGraphMixin):
         inputs_embeds: torch.Tensor = None,
         **kwargs,
     ):
-        return self.language_model.forward(input_ids=input_ids,
+        if self.is_mono:
+            visual_token_mask = (input_ids == IMAGE_DUMMY_TOKEN_INDEX).unsqueeze(-1)
+            # import os
+            # os.environ["DEBUG_IDX"] = str(int(os.environ["DEBUG_IDX"]) + 1)
+            # # if int(os.environ["DEBUG_IDX"]) == 3:
+            # #     import ipdb; ipdb.set_trace()
+            # print(f'{os.environ["DEBUG_IDX"]}')
+            # # import ipdb; ipdb.set_trace()
+            return self.language_model.forward(input_ids=input_ids,
+                                           inputs_embeds=inputs_embeds,
+                                           past_key_values=past_key_values,
+                                           position_ids=position_ids,
+                                           attn_metadata=attn_metadata,
+                                           visual_token_mask=visual_token_mask)
+        else:
+            return self.language_model.forward(input_ids=input_ids,
                                            inputs_embeds=inputs_embeds,
                                            past_key_values=past_key_values,
                                            position_ids=position_ids,
