@@ -6,7 +6,6 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
-from lmdeploy.vl.constants import IMAGE_DUMMY_TOKEN_INDEX
 
 from .patch import build_model_from_hf_config
 from .utils.cudagraph import CudaGraphMixin
@@ -26,9 +25,9 @@ class InternVLChatModel(nn.Module, CudaGraphMixin):
         self.language_model = build_model_from_hf_config(llm_config,
                                                          dtype=dtype,
                                                          device=device)
-        # import ipdb; ipdb.set_trace()
+
         self.llm_arch_name = llm_config.architectures[0]
-        
+
         # for Mono-InternVL
         self.is_mono = self.llm_arch_name == 'InternLM2VEForCausalLM'
 
@@ -39,28 +38,25 @@ class InternVLChatModel(nn.Module, CudaGraphMixin):
         past_key_values: List[List[torch.Tensor]],
         attn_metadata: Any = None,
         inputs_embeds: torch.Tensor = None,
+        vision_embedding_indexing: torch.Tensor = None,
+        text_embedding_indexing: torch.Tensor = None,
         **kwargs,
     ):
         if self.is_mono:
-            visual_token_mask = (input_ids == IMAGE_DUMMY_TOKEN_INDEX).unsqueeze(-1)
-            # import os
-            # os.environ["DEBUG_IDX"] = str(int(os.environ["DEBUG_IDX"]) + 1)
-            # # if int(os.environ["DEBUG_IDX"]) == 3:
-            # #     import ipdb; ipdb.set_trace()
-            # print(f'{os.environ["DEBUG_IDX"]}')
-            # # import ipdb; ipdb.set_trace()
-            return self.language_model.forward(input_ids=input_ids,
-                                           inputs_embeds=inputs_embeds,
-                                           past_key_values=past_key_values,
-                                           position_ids=position_ids,
-                                           attn_metadata=attn_metadata,
-                                           visual_token_mask=visual_token_mask)
+            return self.language_model.forward(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                past_key_values=past_key_values,
+                position_ids=position_ids,
+                attn_metadata=attn_metadata,
+                vision_embedding_indexing=vision_embedding_indexing,
+                text_embedding_indexing=text_embedding_indexing)
         else:
             return self.language_model.forward(input_ids=input_ids,
-                                           inputs_embeds=inputs_embeds,
-                                           past_key_values=past_key_values,
-                                           position_ids=position_ids,
-                                           attn_metadata=attn_metadata)
+                                               inputs_embeds=inputs_embeds,
+                                               past_key_values=past_key_values,
+                                               position_ids=position_ids,
+                                               attn_metadata=attn_metadata)
 
     def get_logits(self, hidden_states: torch.Tensor):
         """compute logits of the model output."""
@@ -91,13 +87,31 @@ class InternVLChatModel(nn.Module, CudaGraphMixin):
                           vision_embedding_indexing, :] = vision_embeddings.to(
                               inputs_embeds)
 
-        return dict(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            attn_metadata=attn_metadata,
-            inputs_embeds=inputs_embeds,
-        )
+        if self.is_mono and vision_embedding_indexing is not None:
+            all_indices = torch.arange(input_ids.shape[1]).to(input_ids)
+            text_embedding_indexing = all_indices[
+                ~torch.isin(all_indices, vision_embedding_indexing)]
+            if vision_embedding_indexing.numel() == 0:
+                vision_embedding_indexing = None
+            if text_embedding_indexing.numel() == 0:
+                text_embedding_indexing = None
+            return dict(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                attn_metadata=attn_metadata,
+                inputs_embeds=inputs_embeds,
+                vision_embedding_indexing=vision_embedding_indexing,
+                text_embedding_indexing=text_embedding_indexing,
+            )
+        else:
+            return dict(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                attn_metadata=attn_metadata,
+                inputs_embeds=inputs_embeds,
+            )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         """load weights."""

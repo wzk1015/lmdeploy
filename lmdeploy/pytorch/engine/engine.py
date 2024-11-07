@@ -752,7 +752,6 @@ class Engine:
 
         for idx in range(loop_count):
             # inference
-            # print("_aysnc_step_forward", idx)
             output = await self._async_model_forward(
                 inputs,
                 swap_in_map=swap_in_map,
@@ -849,7 +848,6 @@ class Engine:
             return any(seq.return_logits for seq in seqs)
 
         while True:
-            # print("!!! async_loop_background loop")
             is_prefill, scheduler_output = await in_que.get()
             try:
                 running = scheduler_output.running
@@ -885,13 +883,7 @@ class Engine:
                     return_logits=return_logits,
                     output_que=out_que,
                 )
-                # if int(os.environ["DEBUG_IDX"]) == 2:
-                # if True:
-                #     import os
-                #     print(f"{os.environ['DEBUG_IDX']=}")
-                #     import ipdb; ipdb.set_trace()
-                #     x = inputs.input_ids.cuda()
-                
+
             except Exception as e:
                 out_que.put_nowait((True, e))
             finally:

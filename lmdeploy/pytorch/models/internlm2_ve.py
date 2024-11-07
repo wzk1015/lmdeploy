@@ -6,17 +6,12 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
-from lmdeploy.pytorch.nn import (ApplyRotaryEmb, Attention, RMSNorm, RopeType,
-                                 SiluAndMul, build_rotary_embedding)
-from lmdeploy.pytorch.nn.linear import (build_merged_colwise_linear,
-                                        build_qkv_proj, build_rowwise_linear)
+from lmdeploy.pytorch.models.internlm2 import InternLM2Attention, InternLM2MLP
+from lmdeploy.pytorch.nn import RMSNorm, RopeType, build_rotary_embedding
+from lmdeploy.pytorch.nn.linear import build_rowwise_linear
 from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
 
-from lmdeploy.pytorch.models.internlm2 import InternLM2MLP, InternLM2Attention
-
 from .utils.cudagraph import CudaGraphMixin
-
-
 
 
 class InternLM2VEDecoderLayer(nn.Module):
@@ -37,7 +32,7 @@ class InternLM2VEDecoderLayer(nn.Module):
 
         # build MLP
         self.feed_forward = InternLM2MLP(config, dtype=dtype, device=device)
-        
+
         # build visual expert
         self.feed_forward_ve = InternLM2MLP(config, dtype=dtype, device=device)
 
@@ -62,7 +57,8 @@ class InternLM2VEDecoderLayer(nn.Module):
         past_key_value: Optional[List[torch.FloatTensor]],
         residual: Optional[torch.Tensor] = None,
         attn_metadata: Any = None,
-        visual_token_mask: Optional[torch.Tensor] = None,
+        vision_embedding_indexing: Optional[torch.Tensor] = None,
+        text_embedding_indexing: Optional[torch.Tensor] = None,
     ):
 
         if residual is None:
@@ -82,18 +78,16 @@ class InternLM2VEDecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.ffn_norm(hidden_states, residual)
-        
-        # import os
-        # if int(os.environ["DEBUG_IDX"]) == 2:
-        #     import ipdb; ipdb.set_trace()
-        
-        # import ipdb; ipdb.set_trace()
-        if visual_token_mask is not None and visual_token_mask.any():
-            visual_token_mask = visual_token_mask.repeat(1, 1, self.hidden_size).bool()
-            text_token_mask = ~visual_token_mask
-            hidden_states[visual_token_mask] = self.feed_forward_ve(hidden_states[visual_token_mask].reshape(-1, self.hidden_size)).flatten()
-            if text_token_mask.any():
-                hidden_states[text_token_mask] = self.feed_forward(hidden_states[text_token_mask].reshape(-1, self.hidden_size)).flatten()
+        if vision_embedding_indexing is not None:
+            hidden_states[:,
+                          vision_embedding_indexing, :] = self.feed_forward_ve(
+                              hidden_states[:, vision_embedding_indexing, :].
+                              reshape(-1, self.hidden_size)).unsqueeze(0)
+            if text_embedding_indexing is not None:
+                hidden_states[:,
+                              text_embedding_indexing, :] = self.feed_forward(
+                                  hidden_states[:, text_embedding_indexing, :].
+                                  reshape(-1, self.hidden_size)).unsqueeze(0)
         else:
             hidden_states = self.feed_forward(hidden_states)
 
@@ -122,9 +116,9 @@ class InternLM2VEModel(nn.Module):
         # build all decode layers
         self.layers = nn.ModuleList([
             InternLM2VEDecoderLayer(config,
-                                  layer_idx,
-                                  dtype=dtype,
-                                  device=device)
+                                    layer_idx,
+                                    dtype=dtype,
+                                    device=device)
             for layer_idx in range(config.num_hidden_layers)
         ])
 
@@ -166,7 +160,8 @@ class InternLM2VEModel(nn.Module):
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         attn_metadata: Any = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
-        visual_token_mask: Optional[torch.Tensor] = None,
+        vision_embedding_indexing: Optional[torch.Tensor] = None,
+        text_embedding_indexing: Optional[torch.Tensor] = None,
     ):
         """Rewrite of forward."""
 
@@ -185,15 +180,14 @@ class InternLM2VEModel(nn.Module):
         residual = None
         for idx, decoder_layer in enumerate(self.layers):
             past_key_value = past_key_values[idx]
-            print("layer", idx)
-                    
             hidden_states, residual = decoder_layer(
                 hidden_states,
                 rotary_pos_emb=rotary_pos_emb,
                 past_key_value=past_key_value,
                 residual=residual,
                 attn_metadata=attn_metadata,
-                visual_token_mask=visual_token_mask,
+                vision_embedding_indexing=vision_embedding_indexing,
+                text_embedding_indexing=text_embedding_indexing,
             )
 
         # norm
@@ -240,7 +234,8 @@ class InternLM2VEForCausalLM(nn.Module, CudaGraphMixin):
         past_key_values: List[List[torch.Tensor]],
         attn_metadata: Any = None,
         inputs_embeds: torch.Tensor = None,
-        visual_token_mask: Optional[torch.Tensor] = None,
+        vision_embedding_indexing: Optional[torch.Tensor] = None,
+        text_embedding_indexing: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         """model forward, return logits."""
@@ -250,7 +245,8 @@ class InternLM2VEForCausalLM(nn.Module, CudaGraphMixin):
             past_key_values=past_key_values,
             attn_metadata=attn_metadata,
             inputs_embeds=inputs_embeds,
-            visual_token_mask=visual_token_mask,
+            vision_embedding_indexing=vision_embedding_indexing,
+            text_embedding_indexing=text_embedding_indexing,
         )
         return hidden_states
 
@@ -261,9 +257,12 @@ class InternLM2VEForCausalLM(nn.Module, CudaGraphMixin):
     def support_cuda_graph(
         self,
         input_ids: torch.Tensor,
+        attn_metadata: Any = None,
         **kwargs,
     ):
         """support cudagraph."""
+        if not attn_metadata.is_decoding:
+            return False
         seq_lens = input_ids.size(1)
         if seq_lens <= 512:
             return True
