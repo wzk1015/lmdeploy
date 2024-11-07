@@ -883,6 +883,7 @@ class Engine:
                     return_logits=return_logits,
                     output_que=out_que,
                 )
+
             except Exception as e:
                 out_que.put_nowait((True, e))
             finally:
